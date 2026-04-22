@@ -596,7 +596,7 @@ ShootProjectile :: proc(gameData: ^GameData, shooter: ^Entity, assets: ^Assets)
     gameData.entityCount += 1
 }
 
-CheckCollision :: proc(entityA: Entity, entityB: Entity) -> bool
+CheckCollision :: proc(entityA: Entity, entityB: Entity) -> (collides: bool)
 {
     return rl.CheckCollisionCircles(entityA.position, entityA.size * SPRITE_TO_HITBOX_SCALE, entityB.position, entityB.size * SPRITE_TO_HITBOX_SCALE)
 }
@@ -604,7 +604,11 @@ CheckCollision :: proc(entityA: Entity, entityB: Entity) -> bool
 main :: proc() 
 {
     rl.InitWindow(GAME_WIDTH * GAME_SCALE_FACTOR, GAME_HEIGHT * GAME_SCALE_FACTOR, "Galaxian Clone")
+    defer rl.CloseWindow()
+
     rl.InitAudioDevice()
+    defer rl.CloseAudioDevice()
+
     rl.SetTargetFPS(60)
 
     target : rl.RenderTexture2D = rl.LoadRenderTexture(GAME_WIDTH, GAME_HEIGHT)
@@ -634,5 +638,5 @@ main :: proc()
         Draw(target, gameData, assets)
     }
 
-    rl.CloseWindow()
+    
 }
