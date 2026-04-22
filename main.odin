@@ -2,6 +2,8 @@ package game
 
 import "core:unicode/utf8/utf8string"
 import "core:encoding/uuid"
+import "core:math/rand"
+import "core:math"
 import rl "vendor:raylib"
 
 MAX_ENTITIES :: 100
@@ -29,6 +31,11 @@ BASE_BLUE_ENEMY_SPRITE : rl.Rectangle : {1, 34, 16, 16}
 BASE_PURPLE_ENEMY_SPRITE : rl.Rectangle : {1, 17, 16, 16}
 BASE_ENEMY_DEATH_SPRITE : rl.Rectangle : { 61, 70, 16, 16 }
 BASE_PLAYER_DEATH_SPRITE : rl.Rectangle : { 1, 87, 32, 32 }
+
+DIVING_CHANCE :: 2
+BLUE_ENEMY_SHOOT_CHANCE :: 25
+PURPLE_ENEMY_SHOOT_CHANCE :: 50
+MAX_STARS :: 50
 
 GameState :: enum
 {
@@ -67,6 +74,13 @@ ProjectileType :: enum
     PLAYER_BULLET,
     ENEMY_BULLET
 }
+
+AIAllyState :: enum
+{
+    STILL,
+    MOVING_LEFT,
+    MOVING_RIGHT
+}
 PlayerData :: struct
 {
     currentProjectiles: u8,
@@ -80,6 +94,7 @@ EnemyData :: struct
     behaviour: EnemyBehaviour,
     deathAnimation: Animation,
     movementAnimation: Animation,
+    diveStartTick: u32,
 }
 
 ProjectileData :: struct
@@ -113,6 +128,12 @@ Entity :: struct
     baseSprite: rl.Rectangle
 }
 
+Star :: struct
+{
+    position: rl.Vector2,
+    speed: f32,
+}
+
 Animation :: struct
 {
     frames: []rl.Rectangle,
@@ -142,6 +163,10 @@ GameData :: struct
     entities: [MAX_ENTITIES]Entity,
     entityCount: u8,
     maxPlayerProjectiles: u8,
+    currentDivingEnemies: u8,
+    maxDivingEnemies: u8,
+    stars: [MAX_STARS]Star,
+    AIallyState: AIAllyState
     
 
 }
@@ -152,6 +177,9 @@ InitializeGameData :: proc(gameData: ^GameData)
     gameData.gameMode = .SOLO
     gameData.entityCount = 0
     gameData.maxPlayerProjectiles = 1
+    gameData.currentDivingEnemies = 0
+    gameData.maxDivingEnemies = 5
+    gameData.AIallyState = .STILL
 }
 
 loadAssets :: proc(assets: ^Assets)
@@ -191,13 +219,13 @@ loadAnimation :: proc(animation: ^Animation, frameCount: u8, baseFrame: rl.Recta
 
 StartGame :: proc(gameData: ^GameData, assets: ^Assets)
 {
-    gameData.entities[0] = { type = .PLAYER, state = .ALIVE, position = {gameData.gameMode == .COOP ? 92.0 : 112.0, 240}, velocity = {0, 0}, size = 16, baseSprite = BASE_PLAYER_SPRITE}
-    gameData.entities[0].data = PlayerData{ currentProjectiles = 0 }
+    gameData.entities[0] = { type = .PLAYER, state = .ALIVE, position = {gameData.gameMode == .COOP ? 92.0 : 112.0, 240}, velocity = {0, 0}, size = 16, baseSprite = BASE_PLAYER_SPRITE, id = 0}
+    gameData.entities[0].data = PlayerData{ currentProjectiles = 0, deathAnimation = assets.playerDeath }
     gameData.entityCount += 1
 
     if (gameData.gameMode == .COOP)
     {
-        gameData.entities[1] = { type = .PLAYER, state = .ALIVE, position = {132, 240}, velocity = {0, 0}, size = 16, baseSprite = BASE_PLAYER_SPRITE}
+        gameData.entities[1] = { type = .PLAYER, state = .ALIVE, position = {132, 240}, velocity = {0, 0}, size = 16, baseSprite = BASE_PLAYER_SPRITE, id = 1}
         gameData.entities[1].data = PlayerData{ currentProjectiles = 0, deathAnimation = assets.playerDeath }
         gameData.entityCount += 1
     }
@@ -217,6 +245,15 @@ StartGame :: proc(gameData: ^GameData, assets: ^Assets)
         gameData.entities[gameData.entityCount] = { type = .ENEMY, state = .ALIVE, position = {f32(GAME_WIDTH / 2.0 - COLUMNS_OF_PURPLE_ENEMIES * ENEMY_SPACING / 2.0 + j * ENEMY_SPACING), PURPLE_ENEMY_STARTING_Y}, velocity = {0.1, 0}, size = ENEMY_SIZE, id = gameData.entityCount, baseSprite = BASE_PURPLE_ENEMY_SPRITE };
         gameData.entities[gameData.entityCount].data = EnemyData{ enemyType = .PURPLE, behaviour = .IN_FORMATION, deathAnimation = assets.enemyDeath, movementAnimation = assets.purpleEnemyMovement }
         gameData.entityCount += 1
+    }
+
+    for i := 0; i < MAX_STARS; i += 1
+    {
+        gameData.stars[i] = 
+        {
+            position = { f32(rand.int_max(GAME_WIDTH)), f32(rand.int_max(GAME_HEIGHT)) },
+            speed = 0.8,
+        }
     }
 }
 
@@ -262,29 +299,119 @@ Update :: proc(gameData: ^GameData, currentTick: u32, assets: ^Assets)
 
         switch gameData.entities[i].type
         {
-            case .PLAYER: UpdatePlayer(gameData)
-            case .ENEMY: UpdateEnemy(gameData, i, currentTick)
+            case .PLAYER: UpdatePlayer(gameData, i, currentTick, assets)
+            case .ENEMY: UpdateEnemy(gameData, i, currentTick, assets)
             case .PROJECTILE: UpdateProjectile(gameData, i, assets)
         }
     }
+
+    if gameData.gameMode == .COOP && gameData.entities[1].type == .PLAYER
+    {
+        UpdateAllyAI(gameData, assets);
+    }
+    
+    for i := 0; i < MAX_STARS; i += 1
+    {
+        gameData.stars[i].position.y += gameData.stars[i].speed
+        if gameData.stars[i].position.y > GAME_HEIGHT
+        {
+            gameData.stars[i].position.y = 0
+            gameData.stars[i].position.x = f32(rand.int_max(GAME_WIDTH))
+        }
+    }
+
+    anyPlayerAlive := 0
+    for j : u8 = 0; j < gameData.entityCount; j += 1
+    {
+        if gameData.entities[j].type == .PLAYER && (gameData.entities[j].state == .ALIVE || gameData.entities[j].state == .DYING)
+        {
+            anyPlayerAlive = 1;
+            break;
+        }
+    }
+    if anyPlayerAlive == 0
+    {
+        gameData.gameState = .GAME_OVER;
+        return;
+    }
 }
 
-UpdatePlayer :: proc(gameData: ^GameData)
+UpdatePlayer :: proc(gameData: ^GameData, id: u8, currentTick: u32, assets: ^Assets)
 {
-
+    playerData := &gameData.entities[id].data.(PlayerData)
+    if gameData.entities[id].state == .DYING
+    {
+        if (currentTick - playerData.deathAnimation.lastFrameChange >= u32(playerData.deathAnimation.ticksPerFrame))
+        {
+            playerData.deathAnimation.currentFrame = (playerData.deathAnimation.currentFrame + 1);
+            playerData.deathAnimation.lastFrameChange = currentTick;
+        }
+        if (playerData.deathAnimation.currentFrame >= playerData.deathAnimation.frameCount)
+        {
+            KillEntity(gameData, id);
+        }
+        return;
+    }
+    
 }
 
-UpdateEnemy :: proc(gameData: ^GameData, id: u8, currentTick: u32)
+UpdateEnemy :: proc(gameData: ^GameData, id: u8, currentTick: u32, assets: ^Assets)
 {
-    switch gameData.entities[id].data.(EnemyData).behaviour
+    enemyData := &gameData.entities[id].data.(EnemyData)
+    if gameData.entities[id].state == .DYING
+    {
+        if (currentTick - enemyData.deathAnimation.lastFrameChange >= u32(enemyData.deathAnimation.ticksPerFrame))
+        {
+            enemyData.deathAnimation.currentFrame = (enemyData.deathAnimation.currentFrame + 1)
+            enemyData.deathAnimation.lastFrameChange = currentTick
+        }
+        if enemyData.deathAnimation.currentFrame >= enemyData.deathAnimation.frameCount do KillEntity(gameData, id)
+        return
+    }
+
+    switch enemyData.behaviour
     {
         case .IN_FORMATION:
             if currentTick % ENEMY_TICKS_PER_DIRECTION == 0
             {
                 gameData.entities[id].velocity.x *= -1
             }
-        case .DIVING:
+            if gameData.currentDivingEnemies < gameData.maxDivingEnemies
+            {
+                divingChance := rand.int_max(10000) 
 
+                if divingChance < DIVING_CHANCE
+                {
+                    enemyData.behaviour = .DIVING
+                    enemyData.diveStartTick = currentTick
+                    gameData.currentDivingEnemies += 1
+                }
+            }
+        case .DIVING:
+            shootChance := rand.int_max(10000) 
+            t := f32(currentTick - enemyData.diveStartTick) * (TICK_DURATION * 2.0);
+            if enemyData.enemyType == .BLUE
+            {
+                gameData.entities[id].velocity = { math.cos(t) * 1.5, math.sin(t * 0.5) * 0.5 };
+                if (shootChance < BLUE_ENEMY_SHOOT_CHANCE)
+                {
+                    ShootProjectile(gameData, &gameData.entities[id], assets);
+                }
+            }
+            else if enemyData.enemyType == .PURPLE
+            {
+                gameData.entities[id].velocity = { math.cos(t) * 3.5, math.sin(t * 0.7) * 0.7};
+                if (shootChance < PURPLE_ENEMY_SHOOT_CHANCE)
+                {
+                    ShootProjectile(gameData, &gameData.entities[id], assets);
+                }
+            }
+    }
+
+    if (currentTick - gameData.entities[id].data.(EnemyData).movementAnimation.lastFrameChange >= u32(gameData.entities[id].data.(EnemyData).movementAnimation.ticksPerFrame))
+    {
+        enemyData.movementAnimation.currentFrame = (gameData.entities[id].data.(EnemyData).movementAnimation.currentFrame + 1) % gameData.entities[id].data.(EnemyData).movementAnimation.frameCount;
+        enemyData.movementAnimation.lastFrameChange = currentTick;
     }
 }
 
@@ -318,7 +445,7 @@ UpdateProjectile :: proc(gameData: ^GameData, id: u8, assets: ^Assets)
                     }
                     KillEntity(gameData, id)
                     if i == gameData.entityCount do i = id;
-                    KillEntity(gameData, gameData.entities[i].id)
+                    gameData.entities[i].state = .DYING
                     rl.PlaySound(assets.hitEnemy);
                     return
                 }
@@ -329,10 +456,30 @@ UpdateProjectile :: proc(gameData: ^GameData, id: u8, assets: ^Assets)
                 if gameData.entities[i].type == .PLAYER && CheckCollision(gameData.entities[i], gameData.entities[id])
                 {
                     rl.PlaySound(assets.fighterLoss);
-                    KillEntity(gameData, id)
+                    gameData.entities[i].state = .DYING
                     return
                 }
             }
+    }
+}
+
+UpdateAllyAI :: proc(gameData: ^GameData, assets: ^Assets)
+{
+    actionChance := rand.int_max(10000) 
+    switch gameData.AIallyState
+    {
+    case .STILL:
+        ShootProjectile(gameData, &gameData.entities[1], assets);
+        if actionChance < 4000 do gameData.AIallyState = .MOVING_LEFT;
+        if actionChance > 6000 do gameData.AIallyState = .MOVING_RIGHT;
+    case .MOVING_LEFT:
+        gameData.entities[1].velocity = { -1.0, 0 };
+        if gameData.entities[1].position.x < 0.0 || actionChance > 9900 do gameData.AIallyState = .MOVING_RIGHT;
+        if actionChance < 100 do gameData.AIallyState = .STILL
+    case .MOVING_RIGHT:
+        gameData.entities[1].velocity = { 1.0, 0 };
+        if gameData.entities[1].position.x > GAME_WIDTH || actionChance > 9900 do gameData.AIallyState = .MOVING_LEFT;
+        if actionChance < 100 do gameData.AIallyState = .STILL
     }
 }
 
@@ -354,6 +501,7 @@ Draw :: proc(target: rl.RenderTexture2D, gameData: ^GameData, assets: ^Assets)
             rl.DrawText("CO-OP", GAME_WIDTH / 2 - rl.MeasureText("CO-OP", 16) / 2, GAME_HEIGHT / 2 + 15, 16, rl.BLUE)
         
         case .IN_GAME:
+            if !rl.IsSoundPlaying(assets.battleTheme) do rl.PlaySound(assets.battleTheme)
             for i : u8 = 0; i < gameData.entityCount; i += 1
             {
                 spritePosition: rl.Rectangle = { f32(i32(gameData.entities[i].position.x - gameData.entities[i].size / 2.0)), f32(i32(gameData.entities[i].position.y - gameData.entities[i].size / 2.0)), gameData.entities[i].size, gameData.entities[i].size }
@@ -363,6 +511,10 @@ Draw :: proc(target: rl.RenderTexture2D, gameData: ^GameData, assets: ^Assets)
                         if gameData.entities[i].state == .ALIVE
                         {
                             rl.DrawTexturePro(assets.spriteSheet, gameData.entities[i].baseSprite, spritePosition, { 0, 0 }, 0.0, rl.WHITE);
+                        }
+                        else if gameData.entities[i].state == .DYING
+                        {
+                            rl.DrawTexturePro(assets.spriteSheet, gameData.entities[i].data.(PlayerData).deathAnimation.frames[gameData.entities[i].data.(PlayerData).deathAnimation.currentFrame], spritePosition, { 0, 0 }, 0.0, rl.WHITE);
                         }                 
                     case .ENEMY:
                         if gameData.entities[i].state == .ALIVE
@@ -375,11 +527,24 @@ Draw :: proc(target: rl.RenderTexture2D, gameData: ^GameData, assets: ^Assets)
                         }
                         
                     case .PROJECTILE:
-                        rl.DrawTexturePro(assets.spriteSheet, gameData.entities[i].baseSprite, spritePosition, { 0, 0 }, 0.0, rl.WHITE);
+                        rl.DrawTexturePro(assets.spriteSheet, gameData.entities[i].baseSprite, spritePosition, { 0, 0 }, 0.0, rl.WHITE)
                 }
                 
             }
+            for i := 0; i < MAX_STARS; i += 1
+            {
+                rl.DrawPixelV(gameData.stars[i].position, rl.WHITE)
+            }
         case .GAME_OVER:
+            rl.EndTextureMode()
+            if rl.IsSoundPlaying(assets.battleTheme) do rl.StopSound(assets.battleTheme)
+            rl.PlaySound(assets.gameOver)
+            rl.BeginDrawing()
+            rl.DrawText("GAME OVER", GAME_WIDTH * GAME_SCALE_FACTOR / 2 - rl.MeasureText("GAME OVER", 60) / 2, GAME_HEIGHT * GAME_SCALE_FACTOR / 2 - 30, 60, rl.WHITE)
+            rl.EndDrawing()
+            rl.WaitTime(5.0)
+            InitializeGameData(gameData)
+            return
     }
 
     rl.EndTextureMode()
